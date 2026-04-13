@@ -1,0 +1,57 @@
+# Gemensam Keycloak + MySQL för hela wigell-realm-portalen
+# Starta med: docker compose up -d
+# Stoppa med: docker compose down
+# Börja om från scratch: docker compose down -v && docker compose up -d
+# Keycloak admin-konsol: http://localhost:8090
+#
+# Vid första uppstart importerar Keycloak automatiskt realm, klienter,
+# roller och användare från keycloak/wigell-realm.json.
+# Data bevaras i Docker-volymen keycloak_data mellan omstarter.
+
+services:
+  # MySQL-databas (används BARA av Keycloak internt, inte av API:erna)
+  keycloak-db:
+    image: mysql:8.0                          # Hämtar MySQL 8 från Docker Hub
+    container_name: wigell-keycloak-db        # Sätter ett namn på containern
+    restart: unless-stopped                   # Startar om automatiskt vid krasch eller omstart. Inte om DU stoppar den
+    environment:
+      MYSQL_ROOT_PASSWORD: root               # Lösenord för databasens root-konto
+      MYSQL_DATABASE: keycloak                # Skapar en databas med det här namnet vid uppstart
+      MYSQL_USER: keycloak                    # Skapar en databasanvändare för Keycloak
+      MYSQL_PASSWORD: password                # Lösenord för den användaren
+    ports:
+      - "6607:3306"                           # Du når databasen på port 6607. Internt används fortfarande 3306
+    volumes:
+      - keycloak_data:/var/lib/mysql          # Här sparas all databas-data (bevaras även om containern tas bort)
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ukeycloak", "-ppassword"]
+      interval: 5s                            # Kontrollerar var 5:e sekund om MySQL är redo
+      timeout: 5s                             # Ger upp efter 5 sekunder per försök
+      retries: 20                             # Max 20 försök innan den ger upp
+
+  # Keycloak – hanterar autentisering och roller (ADMIN/USER) för alla API:er
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.6   # Keycloak-version (matcha med era API:ers konfiguration)
+    container_name: wigell-keycloak           # Sätter ett namn på containern
+    restart: unless-stopped                   # Startar om automatiskt vid krasch eller omstart. Inte om DU stoppar den
+    command: start-dev --import-realm         # Dev-läge + importerar realm från /opt/keycloak/data/import/ vid första start
+    environment:
+      KC_DB: mysql                            # Talar om att Keycloak ska använda MySQL som databas
+      KC_DB_URL: jdbc:mysql://keycloak-db:3306/keycloak  # Kopplar Keycloak till MySQL-containern ovan
+      KC_DB_USERNAME: keycloak                # Ska matcha MYSQL_USER ovan
+      KC_DB_PASSWORD: password                # Ska matcha MYSQL_PASSWORD ovan
+      KEYCLOAK_ADMIN: admin                   # Användarnamn för att logga in på admin-konsolen
+      KEYCLOAK_ADMIN_PASSWORD: admin          # Lösenord för admin-konsolen
+    ports:
+      - "8090:8080"                           # Du når Keycloak på port 8090. API:erna körs på sina egna portar
+    volumes:
+      # Monterar realm-konfigurationen (klienter, roller, användare) i Keycloaks importmapp
+      # :ro = read-only, Keycloak läser filen men ändrar den aldrig
+      - ./keycloak/wigell-realm.json:/opt/keycloak/data/import/wigell-realm.json:ro
+    depends_on:
+      keycloak-db:
+        condition: service_healthy            # Keycloak startar INTE förrän MySQL verkligen är redo
+
+# Volymer – bevarar data även om containrarna tas bort
+volumes:
+  keycloak_data:                              # Keycloaks databas sparas här
